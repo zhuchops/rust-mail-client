@@ -24,6 +24,26 @@ struct LoginArgs {
     password: String,
 }
 
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct SendArgs {
+    #[arg(short, long)]
+    message: String,
+    #[arg(short, long)]
+    file: PathBuf,
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct ListArgs {
+    #[arg(short, long)]
+    read: bool,
+    #[arg(short, long)]
+    unread: bool,
+    #[arg(short, long)]
+    sent: bool,
+}
+
 #[derive(Subcommand)]
 enum AuthSubcommands {
     Register(RegisterArgs),
@@ -31,9 +51,17 @@ enum AuthSubcommands {
 }
 
 #[derive(Subcommand)]
+enum MailSubcommands {
+    Send(SendArgs),
+    List(ListArgs),
+}
+
+#[derive(Subcommand)]
 enum Commands {
     #[command(subcommand)]
     Auth(AuthSubcommands),
+    #[command(subcommand)]
+    Mail(MailSubcommands),
 }
 
 #[derive(Parser)]
@@ -87,13 +115,6 @@ impl AuthConfig {
         tokio::fs::write(path, json).await?;
 
         Ok(())
-    }
-
-    async fn load() -> anyhow::Result<Self> {
-        let path = Self::get_path();
-        let content = tokio::fs::read_to_string(path).await?;
-        let config: AuthConfig = serde_json::from_str(&content)?;
-        Ok(config)
     }
 }
 
@@ -165,6 +186,19 @@ async fn main() -> anyhow::Result<()> {
                         println!("Internal server error. Try again")
                     }
                     _ => {}
+                }
+            }
+        },
+        Commands::Mail(commands) => match commands {
+            MailSubcommands::List(args) => {
+                if args.read {
+                } else if args.sent {
+                } else if args.unread {
+                }
+            }
+            MailSubcommands::Send(args) => {
+                if args.file {
+                } else if args.message {
                 }
             }
         },
