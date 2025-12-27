@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{error, path::PathBuf};
 
+use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, command};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-
-mod client;
+use tokio::fs;
 
 // clap structures
 
@@ -25,16 +25,26 @@ struct LoginArgs {
 }
 
 #[derive(Args)]
-#[group(required = true, multiple = false)]
 struct SendArgs {
     #[arg(short, long)]
-    message: String,
+    receiver: String,
     #[arg(short, long)]
-    file: PathBuf,
+    theme: String,
+    #[command(flatten)]
+    content: MailMessageVariants,
 }
 
 #[derive(Args)]
 #[group(required = true, multiple = false)]
+struct MailMessageVariants {
+    #[arg(short, long)]
+    message: Option<String>,
+    #[arg(short, long)]
+    file: Option<PathBuf>,
+}
+
+#[derive(Args)]
+#[group(required = false, multiple = false)]
 struct ListArgs {
     #[arg(short, long)]
     read: bool,
@@ -42,6 +52,12 @@ struct ListArgs {
     unread: bool,
     #[arg(short, long)]
     sent: bool,
+}
+
+#[derive(Args)]
+struct OpenArgs {
+    #[arg(short, long)]
+    index: i32,
 }
 
 #[derive(Subcommand)]
@@ -54,6 +70,7 @@ enum AuthSubcommands {
 enum MailSubcommands {
     Send(SendArgs),
     List(ListArgs),
+    Open(OpenArgs),
 }
 
 #[derive(Subcommand)]
@@ -85,8 +102,25 @@ struct User {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct Mail {
+    id: i32,
+    theme: String,
+    text: String,
+    status: String,
+    sender: String,
+    receiver: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Token {
     pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateMail {
+    receiver_username: String,
+    theme: String,
+    text: String,
 }
 
 // file system structures
@@ -116,13 +150,31 @@ impl AuthConfig {
 
         Ok(())
     }
+
+    pub async fn load() -> anyhow::Result<Self> {
+        let path = Self::get_path();
+        if !path.exists() {
+            bail!("No config found");
+        }
+
+        let data = tokio::fs::read_to_string(&path).await?;
+        let config =
+            serde_json::from_str(&data).context("Config is corrupted. Fix it or delete")?;
+
+        Ok(config)
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    pretty_env_logger::init();
     let cli = Cli::parse();
     let client = Client::new();
-    let mut config = AuthConfig { access_token: None };
+    let mut config = match AuthConfig::load().await {
+        Ok(config) => config,
+        Err(_) => AuthConfig { access_token: None },
+    };
+    let server_ip = "http://localhost:3000";
 
     match cli.command {
         Commands::Auth(auth_subcommands) => match auth_subcommands {
@@ -136,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
                     password: args.password,
                 };
                 let response = client
-                    .post("http://localhost:3000/users/auth/register")
+                    .post(format!("{server_ip}/users/auth/register"))
                     .json(&new_user)
                     .send()
                     .await?;
@@ -167,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
                     password: args.password,
                 };
                 let response = client
-                    .post("http://localhost:3000/users/auth/login")
+                    .post(format!("{server_ip}/users/auth/login"))
                     .json(&new_user)
                     .send()
                     .await?;
@@ -190,17 +242,110 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Mail(commands) => match commands {
-            MailSubcommands::List(args) => {
-                if args.read {
-                } else if args.sent {
-                } else if args.unread {
+            MailSubcommands::List(args) => match config.access_token {
+                Some(token) => {
+                    log::debug!("token: {}", token);
+                    let reqwest;
+                    if args.read {
+                        reqwest = "mail/read"
+                    } else if args.unread {
+                        reqwest = "mail/unread"
+                    } else if args.sent {
+                        reqwest = "mail/sent"
+                    } else {
+                        reqwest = "mail/all"
+                    }
+
+                    log::debug!("getting response from server...");
+
+                    let response = client
+                        .get(format!("{server_ip}/{reqwest}"))
+                        .bearer_auth(token)
+                        .send()
+                        .await?;
+
+                    log::debug!("got response");
+                    log::debug!("trying to parse response");
+
+                    if response.status().is_success() {
+                        let mails = response.json::<Vec<Mail>>().await?;
+                        log::debug!("response got parsed");
+                        for (i, mail) in mails.iter().enumerate() {
+                            println!(
+                                "[{}]: theme: {}, from: {}, to: {}",
+                                i, mail.theme, mail.sender, mail.receiver
+                            );
+                        }
+                    } else {
+                        log::error!("Response error")
+                    }
                 }
-            }
+                None => {
+                    println!("You are not authorized. Authorize first.")
+                }
+            },
             MailSubcommands::Send(args) => {
-                if args.file {
-                } else if args.message {
+                if let Some(file) = args.content.file {
+                    println!("This function has not been ended. Use -m --message instead")
+                } else if let Some(message) = args.content.message {
+                    match config.access_token {
+                        Some(token) => {
+                            let mail = CreateMail {
+                                receiver_username: args.receiver,
+                                theme: args.theme,
+                                text: message,
+                            };
+
+                            let response = client
+                                .post(format!("{server_ip}/mail/new"))
+                                .json(&mail)
+                                .bearer_auth(&token)
+                                .send()
+                                .await?;
+                            if response.status().is_success() {
+                                println!("Mail sent successfully")
+                            } else {
+                                println!("Error occured during sent process. Please, try again");
+                                println!("{}", response.status());
+                            }
+                        }
+                        None => {
+                            println!("You are not authorized. Authorize first.");
+                        }
+                    }
                 }
             }
+            MailSubcommands::Open(args) => match config.access_token {
+                Some(token) => {
+                    log::debug!("getting response from server...");
+
+                    let response = client
+                        .get(format!("{server_ip}/mail/all"))
+                        .bearer_auth(token)
+                        .send()
+                        .await?;
+
+                    log::debug!("got response");
+                    log::debug!("trying to parse response");
+
+                    if response.status().is_success() {
+                        let mails = response.json::<Vec<Mail>>().await?;
+                        log::debug!("response got parsed");
+
+                        let mail: &Mail = mails.get(args.index as usize).unwrap();
+
+                        println!("from: {}", mail.sender);
+                        println!("to: {}", mail.receiver);
+                        println!("theme: {}", mail.theme);
+                        println!("text: {}", mail.text);
+                    } else {
+                        log::error!("Response error")
+                    }
+                }
+                None => {
+                    println!("You are not authorized. Authorize first.")
+                }
+            },
         },
     }
 
