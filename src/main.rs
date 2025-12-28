@@ -46,12 +46,12 @@ struct MailMessageVariants {
 #[derive(Args)]
 #[group(required = false, multiple = false)]
 struct ListArgs {
-    #[arg(short, long)]
-    read: bool,
-    #[arg(short, long)]
-    unread: bool,
-    #[arg(short, long)]
-    sent: bool,
+    // #[arg(short, long)]
+    // read: bool,
+    // #[arg(short, long)]
+    // unread: bool,
+    // #[arg(short, long)]
+    // sent: bool,
 }
 
 #[derive(Args)]
@@ -246,15 +246,15 @@ async fn main() -> anyhow::Result<()> {
                 Some(token) => {
                     log::debug!("token: {}", token);
                     let reqwest;
-                    if args.read {
-                        reqwest = "mail/read"
-                    } else if args.unread {
-                        reqwest = "mail/unread"
-                    } else if args.sent {
-                        reqwest = "mail/sent"
-                    } else {
-                        reqwest = "mail/all"
-                    }
+                    // if args.read {
+                    //     reqwest = "mail/read"
+                    // } else if args.unread {
+                    //     reqwest = "mail/unread"
+                    // } else if args.sent {
+                    //     reqwest = "mail/sent"
+                    // } else {
+                    reqwest = "mail/all";
+                    // }
 
                     log::debug!("getting response from server...");
 
@@ -305,8 +305,14 @@ async fn main() -> anyhow::Result<()> {
                             if response.status().is_success() {
                                 println!("Mail sent successfully")
                             } else {
-                                println!("Error occured during sent process. Please, try again");
-                                println!("{}", response.status());
+                                match response.status() {
+                                    StatusCode::NOT_FOUND => {
+                                        println!("Can not find user with such username. Try again.")
+                                    }
+                                    _ => {
+                                        println!("Unexpected error has been occured. Try again.")
+                                    }
+                                }
                             }
                         }
                         None => {
@@ -332,7 +338,13 @@ async fn main() -> anyhow::Result<()> {
                         let mails = response.json::<Vec<Mail>>().await?;
                         log::debug!("response got parsed");
 
-                        let mail: &Mail = mails.get(args.index as usize).unwrap();
+                        let mail: &Mail = match mails.get(args.index as usize) {
+                            Some(mail) => mail,
+                            None => {
+                                println!("No such mail has been found");
+                                bail!("No such mail has been found");
+                            }
+                        };
 
                         println!("from: {}", mail.sender);
                         println!("to: {}", mail.receiver);
